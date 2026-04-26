@@ -53,6 +53,7 @@ pnpm dev
 
 - Replace the app name, description, and demo URL in `README.md`.
 - Update `package.json` `name` for the new repository or app.
+- If you change the runtime Node version, update `.nvmrc` and the workflow `node-version` values together.
 - Replace the sample content in `src/App.tsx`, `src/templateData.ts`, and `src/templateData.test.ts`.
 - Choose routing, state management, UI framework, and design system only when the app needs them.
 
