@@ -1,0 +1,231 @@
+name: Deploy Preview
+
+on:
+  push:
+    branches-ignore:
+      - main
+      - master
+      - gh-pages
+  delete:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages-deploy
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.event_name != 'delete'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout preview branch
+        uses: actions/checkout@v4
+        with:
+          path: preview-source
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Enable pnpm
+        run: corepack enable
+      - name: Install preview dependencies
+        working-directory: preview-source
+        run: pnpm install --frozen-lockfile
+      - name: Check preview formatting
+        working-directory: preview-source
+        run: pnpm format:check
+      - name: Lint preview
+        working-directory: preview-source
+        run: pnpm lint
+      - name: Typecheck preview
+        working-directory: preview-source
+        run: pnpm typecheck
+      - name: Unit tests
+        working-directory: preview-source
+        run: pnpm test
+      - name: Resolve preview target
+        id: target
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          repo_name="${GITHUB_REPOSITORY#*/}"
+          branch_name="${GITHUB_REF_NAME}"
+          default_branch="${{ github.event.repository.default_branch }}"
+          if [[ -z "${default_branch}" ]]; then
+            default_branch="main"
+          fi
+
+          slug="$(printf '%s' "${branch_name}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/-+/-/g; s/^-//; s/-$//')"
+          if [[ -z "${slug}" ]]; then
+            slug="branch"
+          fi
+
+          deploy_path="__preview/${slug}"
+          main_base_path="/${repo_name}/"
+          base_path="/${repo_name}/${deploy_path}/"
+          preview_url="https://${GITHUB_REPOSITORY_OWNER}.github.io/${repo_name}/${deploy_path}/"
+
+          {
+            echo "default-branch=${default_branch}"
+            echo "deploy-path=${deploy_path}"
+            echo "main-base-path=${main_base_path}"
+            echo "base-path=${base_path}"
+            echo "preview-url=${preview_url}"
+          } >> "${GITHUB_OUTPUT}"
+
+          {
+            echo "### Pages preview deployment"
+            echo
+            echo "- Branch: \`${branch_name}\`"
+            echo "- Base path: \`${base_path}\`"
+            echo "- Preview: ${preview_url}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+      - name: Build preview
+        working-directory: preview-source
+        run: pnpm build
+        env:
+          VITE_BASE_PATH: ${{ steps.target.outputs.base-path }}
+      - name: Checkout main for root demo
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.target.outputs.default-branch }}
+          path: main-source
+      - name: Install main dependencies
+        working-directory: main-source
+        run: pnpm install --frozen-lockfile
+      - name: Build main root
+        working-directory: main-source
+        run: pnpm build
+        env:
+          VITE_BASE_PATH: ${{ steps.target.outputs.main-base-path }}
+      - name: Update preview Pages contents
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          pages_dir="${RUNNER_TEMP}/pages"
+          deploy_path="${{ steps.target.outputs.deploy-path }}"
+          remote_url="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+
+          mkdir -p "${pages_dir}"
+          git -C "${pages_dir}" init
+          git -C "${pages_dir}" remote add origin "${remote_url}"
+
+          if git -C "${pages_dir}" fetch --depth=1 origin gh-pages; then
+            git -C "${pages_dir}" checkout -B gh-pages FETCH_HEAD
+          else
+            git -C "${pages_dir}" checkout --orphan gh-pages
+          fi
+
+          find "${pages_dir}" -mindepth 1 -maxdepth 1 \
+            ! -name .git \
+            ! -name __preview \
+            -exec rm -rf {} +
+          cp -a main-source/dist/. "${pages_dir}/"
+
+          rm -rf "${pages_dir}/${deploy_path}"
+          mkdir -p "${pages_dir}/${deploy_path}"
+          cp -a preview-source/dist/. "${pages_dir}/${deploy_path}/"
+
+          touch "${pages_dir}/.nojekyll"
+          git -C "${pages_dir}" config user.name "github-actions[bot]"
+          git -C "${pages_dir}" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C "${pages_dir}" add -A
+
+          if git -C "${pages_dir}" diff --cached --quiet; then
+            echo "No Pages content changes to publish."
+          else
+            git -C "${pages_dir}" commit -m "Deploy preview for ${GITHUB_REF_NAME}"
+            git -C "${pages_dir}" push origin gh-pages
+          fi
+
+          echo "PAGES_DIR=${pages_dir}" >> "${GITHUB_ENV}"
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: ${{ env.PAGES_DIR }}
+      - id: deployment
+        uses: actions/deploy-pages@v4
+
+  cleanup:
+    if: github.event_name == 'delete' && github.event.ref_type == 'branch' && github.event.ref != 'main' && github.event.ref != 'master' && github.event.ref != 'gh-pages'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve deleted preview target
+        id: target
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          repo_name="${GITHUB_REPOSITORY#*/}"
+          branch_name="${{ github.event.ref }}"
+          slug="$(printf '%s' "${branch_name}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/-+/-/g; s/^-//; s/-$//')"
+          if [[ -z "${slug}" ]]; then
+            slug="branch"
+          fi
+
+          deploy_path="__preview/${slug}"
+
+          {
+            echo "deploy-path=${deploy_path}"
+            echo "preview-url=https://${GITHUB_REPOSITORY_OWNER}.github.io/${repo_name}/${deploy_path}/"
+          } >> "${GITHUB_OUTPUT}"
+
+          {
+            echo "### Pages preview cleanup"
+            echo
+            echo "- Deleted branch: \`${branch_name}\`"
+            echo "- Removed preview: https://${GITHUB_REPOSITORY_OWNER}.github.io/${repo_name}/${deploy_path}/"
+          } >> "${GITHUB_STEP_SUMMARY}"
+      - name: Remove preview from Pages contents
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          pages_dir="${RUNNER_TEMP}/pages"
+          deploy_path="${{ steps.target.outputs.deploy-path }}"
+          remote_url="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+
+          mkdir -p "${pages_dir}"
+          git -C "${pages_dir}" init
+          git -C "${pages_dir}" remote add origin "${remote_url}"
+
+          if ! git -C "${pages_dir}" fetch --depth=1 origin gh-pages; then
+            echo "No gh-pages branch exists; nothing to clean."
+            echo "DEPLOY_PAGES=false" >> "${GITHUB_ENV}"
+            exit 0
+          fi
+
+          git -C "${pages_dir}" checkout -B gh-pages FETCH_HEAD
+          rm -rf "${pages_dir}/${deploy_path}"
+          touch "${pages_dir}/.nojekyll"
+          git -C "${pages_dir}" config user.name "github-actions[bot]"
+          git -C "${pages_dir}" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C "${pages_dir}" add -A
+
+          if git -C "${pages_dir}" diff --cached --quiet; then
+            echo "No preview directory changed."
+          else
+            git -C "${pages_dir}" commit -m "Remove Pages preview for ${{ github.event.ref }}"
+            git -C "${pages_dir}" push origin gh-pages
+          fi
+
+          echo "DEPLOY_PAGES=true" >> "${GITHUB_ENV}"
+          echo "PAGES_DIR=${pages_dir}" >> "${GITHUB_ENV}"
+      - uses: actions/configure-pages@v5
+        if: env.DEPLOY_PAGES == 'true'
+      - uses: actions/upload-pages-artifact@v3
+        if: env.DEPLOY_PAGES == 'true'
+        with:
+          path: ${{ env.PAGES_DIR }}
+      - id: deployment
+        if: env.DEPLOY_PAGES == 'true'
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,107 @@
+name: Deploy Pages
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Enable pnpm
+        run: corepack enable
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Check formatting
+        run: pnpm format:check
+      - name: Lint
+        run: pnpm lint
+      - name: Typecheck
+        run: pnpm typecheck
+      - name: Unit tests
+        run: pnpm test
+      - name: Resolve Pages target
+        id: target
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          repo_name="${GITHUB_REPOSITORY#*/}"
+          base_path="/${repo_name}/"
+
+          echo "base-path=${base_path}" >> "${GITHUB_OUTPUT}"
+
+          {
+            echo "### Pages deployment"
+            echo
+            echo "- Base path: \`${base_path}\`"
+            echo "- Site: https://${GITHUB_REPOSITORY_OWNER}.github.io/${repo_name}/"
+          } >> "${GITHUB_STEP_SUMMARY}"
+      - name: Build
+        run: pnpm build
+        env:
+          VITE_BASE_PATH: ${{ steps.target.outputs.base-path }}
+      - name: Update main Pages contents
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          pages_dir="${RUNNER_TEMP}/pages"
+          remote_url="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+
+          mkdir -p "${pages_dir}"
+          git -C "${pages_dir}" init
+          git -C "${pages_dir}" remote add origin "${remote_url}"
+
+          if git -C "${pages_dir}" fetch --depth=1 origin gh-pages; then
+            git -C "${pages_dir}" checkout -B gh-pages FETCH_HEAD
+          else
+            git -C "${pages_dir}" checkout --orphan gh-pages
+          fi
+
+          find "${pages_dir}" -mindepth 1 -maxdepth 1 \
+            ! -name .git \
+            ! -name __preview \
+            -exec rm -rf {} +
+          cp -a dist/. "${pages_dir}/"
+
+          touch "${pages_dir}/.nojekyll"
+          git -C "${pages_dir}" config user.name "github-actions[bot]"
+          git -C "${pages_dir}" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C "${pages_dir}" add -A
+
+          if git -C "${pages_dir}" diff --cached --quiet; then
+            echo "No Pages content changes to publish."
+          else
+            git -C "${pages_dir}" commit -m "Deploy main to Pages"
+            git -C "${pages_dir}" push origin gh-pages
+          fi
+
+          echo "PAGES_DIR=${pages_dir}" >> "${GITHUB_ENV}"
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: ${{ env.PAGES_DIR }}
+      - id: deployment
+        uses: actions/deploy-pages@v4
