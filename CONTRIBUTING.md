@@ -7,6 +7,7 @@ Contributors should leave enough context for reviewers to reproduce the purpose,
 
 - Check whether a related issue already exists.
 - If there is no issue, open one with the goal, expected behavior, non-goals, and open questions.
+- Choose the most specific issue template when opening a new issue; if unsure, use `General`.
 - Keep each implementation PR focused on one purpose.
 - Discuss large design, CI/CD, or deployment changes in an issue before implementation.
 - Follow the deployment and CI/CD rules in this document.

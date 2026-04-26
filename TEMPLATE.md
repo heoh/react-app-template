@@ -46,6 +46,7 @@ pnpm dev
 - `src/templateData.ts`: Example data shared by the screen and tests
 - `src/index.css`: Basic responsive styles
 - `tests`: Browser smoke tests
+- `.github/ISSUE_TEMPLATE`: Guided issue templates with `General` as the fallback
 - `.github/workflows`: CI, main Pages deployment, and branch preview deployment
 
 ## After Creating an App
